@@ -4,7 +4,7 @@ const fs = require("fs");
 const multer = require("multer");
 
 const app = express();
-const PORT = 8080;
+const PORT = process.env.PORT || 8080;
 
 // ⚠️ Change this if you want external SD path
 const uploadDir = path.join(__dirname, "uploads");
