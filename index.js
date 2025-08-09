@@ -1,86 +1,119 @@
 const express = require("express");
-const path = require("path");
-const fs = require("fs");
 const multer = require("multer");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
-const PORT = process.env.PORT || 8080;
-
-// ⚠️ Change this if you want external SD path
 const uploadDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+const chunksDir = path.join(uploadDir, "chunks");
 
-// Save chunks temporarily as files (no memory used)
+// Ensure directories exist
+fs.mkdirSync(uploadDir, { recursive: true });
+fs.mkdirSync(chunksDir, { recursive: true });
+
+// Multer setup for chunk uploads
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => cb(null, "__chunk.tmp")
+  destination: (req, file, cb) => {
+    cb(null, chunksDir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  }
 });
 const upload = multer({ storage });
 
-app.use("/uploads", express.static(uploadDir));
-// app.use("/public", express.static(path.join(__dirname, "public")));
-app.use(express.static("public"));
+app.use(express.static(path.join(__dirname, "public")));
 
-app.get("/", (req, res) =>
-    res.sendFile(path.join(__dirname, "public/index.html"))
-);
-app.get("/upload", (req, res) =>
-    res.sendFile(path.join(__dirname, "public/upload.html"))
-);
+// Endpoint to handle chunk uploads
+app.post("/upload", upload.single("chunk"), (req, res) => {
+  const { chunkIndex, totalChunks, fileName } = req.body;
+  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const tempDir = path.join(chunksDir, safeName);
 
-app.get("/files", (req, res) => {
-    fs.readdir(uploadDir, (err, files) => {
-        if (err) return res.status(500).send("Error reading files");
-        res.json(files.filter(f => f.toLowerCase().endsWith(".mp4")));
-    });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  // Move chunk into temp folder
+  const chunkPath = path.join(tempDir, chunkIndex);
+  fs.renameSync(req.file.path, chunkPath);
+
+  // Merge when all chunks are uploaded
+  const uploadedChunks = fs.readdirSync(tempDir);
+  if (uploadedChunks.length == totalChunks) {
+    const finalPath = path.join(uploadDir, safeName);
+    const writeStream = fs.createWriteStream(finalPath);
+
+    uploadedChunks
+      .sort((a, b) => Number(a) - Number(b))
+      .forEach(chunkFile => {
+        const chunkData = fs.readFileSync(path.join(tempDir, chunkFile));
+        writeStream.write(chunkData);
+        fs.unlinkSync(path.join(tempDir, chunkFile));
+      });
+
+    writeStream.end();
+    fs.rmdirSync(tempDir);
+  }
+
+  res.send("OK");
 });
 
-app.delete("/delete/:file", (req, res) => {
-    const filePath = path.join(uploadDir, req.params.file);
-    if (fs.existsSync(filePath)) {
-        fs.unlink(filePath, err => {
-            if (err) return res.status(500).send("Delete failed");
-            res.sendStatus(200);
-        });
-    } else {
-        res.status(404).send("File not found");
+// Delete file
+app.get("/delete", (req, res) => {
+  const target = path.basename(req.query.delete || "");
+  const filePath = path.join(uploadDir, target);
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  res.redirect("/admin.html");
+});
+
+// List videos
+app.get("/videos", (req, res) => {
+  const videos = fs
+    .readdirSync(uploadDir)
+    .filter(f => /\.(mp4|webm|ogg)$/i.test(f));
+  res.json(videos);
+});
+
+// Stream video with range support
+app.get("/stream/:file", (req, res) => {
+  const filePath = path.join(uploadDir, path.basename(req.params.file));
+  if (!fs.existsSync(filePath)) return res.status(404).send("File not found");
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+
+  let start = 0;
+  let end = fileSize - 1;
+
+  if (range) {
+    const match = range.match(/bytes=(\d+)-(\d*)/);
+    if (match) {
+      start = parseInt(match[1], 10);
+      if (match[2]) end = parseInt(match[2], 10);
     }
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  const mime =
+    ext === ".webm"
+      ? "video/webm"
+      : ext === ".ogg" || ext === ".ogv"
+      ? "video/ogg"
+      : "video/mp4";
+
+  res.setHeader("Content-Type", mime);
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Content-Length", end - start + 1);
+  res.setHeader("Cache-Control", "public, max-age=2592000");
+
+  const stream = fs.createReadStream(filePath, { start, end });
+  stream.pipe(res);
 });
 
-app.post("/upload", upload.single("file"), (req, res) => {
-    const start = parseInt(req.headers["x-start"]) || 0;
-    const customName = req.headers["x-custom-name"];
-    if (!customName) return res.status(400).send("Missing custom file name");
-
-    const destPath = path.join(uploadDir, customName);
-    const chunkPath = req.file.path;
-
-    if (fs.existsSync(destPath) && start === 0) {
-        fs.unlink(chunkPath, () => {});
-        return res.status(400).send("File already exists");
-    }
-
-    const readStream = fs.createReadStream(chunkPath);
-    const writeStream = fs.createWriteStream(destPath, { flags: "a" });
-
-    readStream.pipe(writeStream);
-
-    writeStream.on("finish", () => {
-        fs.unlink(chunkPath, () => {});
-        res.send(req.file.size.toString());
-    });
-
-    writeStream.on("error", () => {
-        fs.unlink(chunkPath, () => {});
-        res.status(500).send("Write error");
-    });
-
-    readStream.on("error", () => {
-        fs.unlink(chunkPath, () => {});
-        res.status(500).send("Read error");
-    });
-});
-
+// Start server
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
-    console.log(`Server running on http://localhost:${PORT}`)
+  console.log(`Server running on http://localhost:${PORT}`)
 );

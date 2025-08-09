@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin Panel</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Upload Movie</h1>
+<input type="file" id="fileInput" accept="video/*">
+<progress id="progress" value="0" max="100"></progress>
+<div id="details"></div>
+
+<h2>Uploaded Videos</h2>
+<div id="videoList"></div>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const progressBar = document.getElementById('progress');
+const details = document.getElementById('details');
+const videoList = document.getElementById('videoList');
+
+async function loadVideos() {
+  const res = await fetch('/videos');
+  const files = await res.json();
+  videoList.innerHTML = files.map(file => `
+    <div class="video-item">
+      <span>${file}</span>
+      <a href="/delete?delete=${encodeURIComponent(file)}" onclick="return confirm('Delete this video?')">Delete</a>
+    </div>
+  `).join('');
+}
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  const chunkSize = 2 * 1024 * 1024; // 2MB
+  const totalChunks = Math.ceil(file.size / chunkSize);
+  let uploadedBytes = 0;
+  const startTime = Date.now();
+
+  for (let i = 0; i < totalChunks; i++) {
+    const chunk = file.slice(i * chunkSize, (i + 1) * chunkSize);
+    const formData = new FormData();
+    formData.append('chunk', chunk);
+    formData.append('chunkIndex', i);
+    formData.append('totalChunks', totalChunks);
+    formData.append('fileName', file.name);
+
+    const res = await fetch('/upload', { method: 'POST', body: formData });
+    if (!res.ok) {
+      alert(`Chunk ${i} failed to upload`);
+      return;
+    }
+
+    uploadedBytes += chunk.size;
+    const percent = ((i + 1) / totalChunks) * 100;
+    const elapsed = (Date.now() - startTime) / 1000;
+    const speed = (uploadedBytes / 1024 / 1024 / elapsed).toFixed(2);
+
+    progressBar.value = percent;
+    details.textContent = `${percent.toFixed(1)}% uploaded (${speed} MB/s)`;
+  }
+
+  alert('Upload complete!');
+  loadVideos();
+});
+
+loadVideos();
+</script>
+</body>
+</html>
